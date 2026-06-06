@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
-requests
-matplotlib
-numpy
+requests==2.31.0
+matplotlib==3.8.2
+numpy==1.26.4
