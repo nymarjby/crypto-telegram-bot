@@ -2,6 +2,7 @@ import logging
 import re
 import io
 import asyncio
+import os
 from datetime import datetime, timezone
 
 import requests
@@ -15,26 +16,27 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-import os
-TELEGRAM_BOT_TOKEN = os.environ.get("8545101004:AAGHbE4kG2g9N2rtRkgkx22n_i4r5O5Ro44")
+TELEGRAM_BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is not set!")
+
 MEXC_BASE = "https://api.mexc.com"
 # ───────────────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+print(f"[DEBUG] Token loaded: {TELEGRAM_BOT_TOKEN[:10]}...")
 
-# ── helpers ──────────────────────────────────────────────────────────────────
 
-def find_symbol(ticker: str) -> str | None:
-    """Return the MEXC symbol (e.g. BTCUSDT) for a given ticker, or None."""
+def find_symbol(ticker: str):
     ticker = ticker.upper()
     candidates = [f"{ticker}USDT", f"{ticker}USDC", f"{ticker}BTC"]
     for sym in candidates:
         r = requests.get(f"{MEXC_BASE}/api/v3/ticker/24hr", params={"symbol": sym}, timeout=10)
         if r.status_code == 200:
             return sym
-    # Fallback: search exchange info
     try:
         r = requests.get(f"{MEXC_BASE}/api/v3/exchangeInfo", timeout=15)
         symbols = r.json().get("symbols", [])
@@ -46,13 +48,12 @@ def find_symbol(ticker: str) -> str | None:
     return None
 
 
-def get_ticker(symbol: str) -> dict | None:
+def get_ticker(symbol: str):
     r = requests.get(f"{MEXC_BASE}/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10)
     return r.json() if r.status_code == 200 else None
 
 
-def get_klines(symbol: str, interval: str = "1h", limit: int = 168) -> list | None:
-    """Fetch kline/candlestick data. Default: hourly for last 7 days."""
+def get_klines(symbol: str, interval: str = "1h", limit: int = 168):
     r = requests.get(
         f"{MEXC_BASE}/api/v3/klines",
         params={"symbol": symbol, "interval": interval, "limit": limit},
@@ -62,7 +63,6 @@ def get_klines(symbol: str, interval: str = "1h", limit: int = 168) -> list | No
 
 
 def build_chart(symbol: str, klines: list, ticker: dict) -> io.BytesIO:
-    """Render a price chart and return it as a PNG buffer."""
     times, closes, volumes = [], [], []
     for k in klines:
         times.append(datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc))
@@ -80,7 +80,6 @@ def build_chart(symbol: str, klines: list, ticker: dict) -> io.BytesIO:
     )
     fig.subplots_adjust(hspace=0.05)
 
-    # ── price line ──
     ax1.set_facecolor("#0f1117")
     ax1.plot(times, closes, color=color, linewidth=1.8, zorder=3)
     ax1.fill_between(times, closes, closes.min(), alpha=0.15, color=color)
@@ -109,10 +108,8 @@ def build_chart(symbol: str, klines: list, ticker: dict) -> io.BytesIO:
         color="#ffffff", fontsize=12, fontweight="bold", pad=10, loc="left"
     )
 
-    # ── volume bars ──
     ax2.set_facecolor("#0f1117")
-    bar_colors = [color] * len(times)
-    ax2.bar(times, volumes, width=0.03, color=bar_colors, alpha=0.6)
+    ax2.bar(times, volumes, width=0.03, color=color, alpha=0.6)
     ax2.set_xlim(times[0], times[-1])
     ax2.yaxis.set_label_position("right")
     ax2.yaxis.tick_right()
@@ -170,36 +167,27 @@ def build_caption(symbol: str, t: dict) -> str:
     return "\n".join(lines)
 
 
-# ── handler ──────────────────────────────────────────────────────────────────
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text or ""
     tickers = re.findall(r"\$([A-Za-z]{1,20})", text)
     if not tickers:
         return
 
-    # Deduplicate while preserving order
     seen, unique = set(), []
     for t in tickers:
         if t.upper() not in seen:
             seen.add(t.upper())
             unique.append(t.upper())
 
-    for ticker in unique[:3]:   # max 3 per message to avoid spam
+    for ticker in unique[:3]:
         symbol = find_symbol(ticker)
         if not symbol:
-            await update.message.reply_text(
-                f"❌ Could not find *${ticker}* on MEXC.",
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"❌ Could not find *${ticker}* on MEXC.", parse_mode="Markdown")
             continue
 
         ticker_data = get_ticker(symbol)
         if not ticker_data or "lastPrice" not in ticker_data:
-            await update.message.reply_text(
-                f"❌ Failed to fetch data for *{symbol}*.",
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"❌ Failed to fetch data for *{symbol}*.", parse_mode="Markdown")
             continue
 
         klines = get_klines(symbol)
@@ -209,16 +197,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             chart_buf = await asyncio.get_event_loop().run_in_executor(
                 None, build_chart, symbol, klines, ticker_data
             )
-            await update.message.reply_photo(
-                photo=chart_buf,
-                caption=caption,
-                parse_mode="Markdown"
-            )
+            await update.message.reply_photo(photo=chart_buf, caption=caption, parse_mode="Markdown")
         else:
             await update.message.reply_text(caption, parse_mode="Markdown")
 
-
-# ── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
